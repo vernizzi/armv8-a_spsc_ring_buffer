@@ -6,6 +6,28 @@
 
 #define SPSC_CACHELINE_SIZE 64
 
+/*
+ * Ring buffer structure.
+ *
+ * MEMORY LAYOUT (must match assembly offsets exactly):
+ *
+ *   Offset   Field           Size   Notes
+ *   ------   -----           ----   -----
+ *     0      buffer          8      Pointer to element storage
+ *     8      capacity        8      Number of slots (power of 2)
+ *    16      mask            8      capacity - 1 (for fast modulo)
+ *    24      element_size    8      Bytes per element
+ *           (automatic padding by _Alignas — 32 bytes inserted by compiler)
+ *   ---- CACHE LINE BOUNDARY (offset 64) ----
+ *    64      head            8      Next write index  [producer writes, consumer reads]
+ *    72      cached_tail     8      Producer's local snapshot of tail
+ *           (automatic padding by _Alignas — 48 bytes inserted by compiler)
+ *   ---- CACHE LINE BOUNDARY (offset 128) ----
+ *   128      tail            8      Next read index   [consumer writes, producer reads]
+ *   136      cached_head     8      Consumer's local snapshot of head
+ *           (automatic tail padding — 48 bytes for sizeof to be multiple of 64)
+ *   ---- END (offset 192) ----
+ */
 typedef struct {
     void        *buffer;                    /* +0:   element storage          */
     uint64_t     capacity;                  /* +8:   number of slots          */
