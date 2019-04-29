@@ -55,10 +55,51 @@ _Static_assert(__builtin_offsetof(spsc_ring_buffer_t, tail) == 128, "tail must b
 extern "C" {
 #endif
 
+/*
+ * spsc_init - Initialize the ring buffer.
+ *
+ * @rb:           Pointer to the ring buffer struct (must be 64-byte aligned).
+ * @buffer:       Pointer to pre-allocated storage for elements.
+ *                Must hold at least (capacity * element_size) bytes.
+ *                Should be naturally aligned for the element type.
+ * @capacity:     Number of slots. MUST be a power of 2.
+ * @element_size: Size of each element in bytes.
+ *
+ * Must be called before any thread calls spsc_push() or spsc_pop().
+ * Not thread-safe with respect to push/pop.
+ */
 void spsc_init(spsc_ring_buffer_t* rb, void* buffer, uint64_t capacity, uint64_t element_size);
 
+/*
+ * spsc_push - Enqueue one element (PRODUCER THREAD ONLY).
+ *
+ * @rb:      Pointer to the ring buffer struct.
+ * @element: Pointer to the element to copy into the buffer.
+ *           Must point to at least `element_size` readable bytes.
+ *
+ * Returns:  0 on success, 1 if the buffer is full.
+ *
+ * Memory ordering:
+ *   The element data is written with plain stores, then head is updated
+ *   with a store-release (STLR). This guarantees the consumer sees the
+ *   element data before it sees the updated head.
+ */
 int spsc_push(spsc_ring_buffer_t* rb, const void* element);
 
+/*
+ * spsc_pop — Dequeue one element (CONSUMER THREAD ONLY).
+ *
+ * @rb:      Pointer to the ring buffer struct.
+ * @element: Pointer to destination buffer where the dequeued element
+ *           will be copied. Must have space for `element_size` bytes.
+ *
+ * Returns:  0 on success, 1 if the buffer is empty.
+ *
+ * Memory ordering:
+ *   Head is read with a load-acquire (LDAR), ensuring we see all data
+ *   the producer wrote before updating head. After copying, tail is
+ *   updated with a store-release (STLR) to signal the slot is free.
+ */
 int spsc_pop(spsc_ring_buffer_t* rb, void* element);
 
 #ifdef __cplusplus
