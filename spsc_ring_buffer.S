@@ -1,3 +1,112 @@
+/* ===========================================================================
+ * spsc_ring_buffer.S — Lock-Free SPSC Ring Buffer for ARMv8-A
+ *                      (Cortex-A53, Cortex-A76, and any ARMv8-A core)
+ * ===========================================================================
+ *
+ * OVERVIEW
+ * --------
+ * A Single-Producer Single-Consumer (SPSC) ring buffer is the simplest form
+ * of lock-free queue. Only ONE thread may call push (the producer) and only
+ * ONE thread may call pop (the consumer). This constraint means we never need
+ * atomic read-modify-write (no LDXR/STXR, no CAS), we only need proper
+ * load/store ordering.
+ *
+ * WHY MEMORY BARRIERS ON CORTEX-A76?
+ * -----------------------------------
+ * ARM processors (including Cortex-A76) have a WEAK memory model. This means
+ * the CPU is free to reorder loads and stores for performance, as long as the
+ * reordering is invisible to the CURRENT thread. But another thread on another
+ * core CAN observe these reorderings.
+ *
+ * ACQUIRE-RELEASE SEMANTICS (ARMv8.0-A relies on RCsc)
+ * -------------------------
+ * ARMv8-A provides two key instructions for ordering without full barriers:
+ *
+ *   LDAR  (Load-Acquire Register)
+ *     Mnemonic breakdown: LD = Load, A = Acquire, R = Register
+ *     Semantics: loads a value AND prevents any subsequent memory operation
+ *     (load or store) from being reordered BEFORE this load (the one-way
+ *     "acquire" fence).
+ *
+ *     IMPORTANT — RCsc strength: LDAR is more than a one-way fence. It also
+ *     cannot be reordered before a PRIOR STLR, even one to a DIFFERENT
+ *     address. In other words, all LDAR/STLR operations in the system slot
+ *     into a single total order that every core agrees on. This is the
+ *     "Release Consistent sequentially consistent" (RCsc) property, and it
+ *     maps to C++11 memory_order_seq_cst. This is exactly what ARMv8.3's
+ *     RCpc LDAPR will later relax.
+ *
+ *   STLR  (Store-Release Register)
+ *     Mnemonic breakdown: ST = Store, L = reLease, R = Register
+ *     Semantics: stores a value AND ensures all preceding memory operations
+ *     (loads and stores) are visible BEFORE this store is seen by others
+ *     (the one-way "release" fence).
+ *
+ * Together, STLR (producer) + LDAR (consumer) form an ACQUIRE-RELEASE PAIR:
+ *   - Producer: write data, then STLR tail  ->  data is visible before tail
+ *   - Consumer: LDAR tail, then read data   ->  sees data written before tail
+ *
+ * These are cheaper than full DMB barriers because each only enforces ordering
+ * in one direction (acquire = downstream fence, release = upstream fence),
+ * whereas DMB is a bidirectional fence that stalls more of the pipeline.
+ *
+ * CACHED INDICES OPTIMIZATION
+ * ---------------------------
+ * In the basic SPSC design, the producer must read `tail` (LDAR) on every
+ * push to check if the buffer is full, and the consumer must read `head`
+ * (LDAR) on every pop to check if the buffer is empty.
+ *
+ * This is wasteful: if the buffer has 1000 free slots, the producer doesn't
+ * need to re-check tail for the next 999 pushes!
+ *
+ * common optimization: each side keeps a local cache of the other's index.
+ *   - Producer keeps `cached_tail`: the last known value of tail
+ *   - Consumer keeps `cached_head`: the last known value of head
+ *
+ * The cached value is only refreshed (with an expensive LDAR) when the stale
+ * cache suggests the buffer MIGHT be full/empty. This dramatically reduces
+ * cross-core cache traffic and expensive acquire loads in the common case.
+ *
+ * WHAT ABOUT LDAPR? (ARMv8.3-A FEAT_LRCPC, RCpc)
+ * ----------------------------------------------
+ * ARMv8.3-A introduced LDAPR (Load-Acquire RCpc Register). It provides
+ * "Release Consistent processor consistent" (RCpc) ordering, which is a
+ * weaker, and for this queue, sufficient, form of acquire.
+ *
+ * Unfortunatelly, the Cortex-A53 implements ARMv8.0-A. FEAT_LRCPC (LDAPR)
+ * was not added until ARMv8.3-A, so on the A53 the LDAPR encoding is
+ * simply not a valid instruction. Therefore this implementation uses
+ * LDAR/STLR throughout. The cost is a marginally stronger-than-necessary
+ * ordering on each acquire load; the benefit is correct, portable code
+ * on every ARMv8.0-A part including the A53.
+ *
+ * STRUCT LAYOUT (must match C header)
+ * -----------------------------------
+ * The struct is carefully laid out so that fields accessed by different threads
+ * reside on DIFFERENT CACHE LINES (64 bytes on Cortex-A76). This prevents
+ * "false sharing" where writes by one core invalidate the cache line on the
+ * other core, even for unrelated data.
+ *
+ * Offset  Field           Accessed by     Description
+ * ------  -----           -----------     -----------
+ *   0     buffer          both (RO)       Pointer to element storage
+ *   8     capacity        both (RO)       Number of slots (must be power of 2)
+ *  16     mask            both (RO)       capacity - 1 (for fast modulo via AND)
+ *  24     element_size    both (RO)       Size of each element in bytes
+ *  32     (padding)       -               Pad to 64-byte boundary
+ *  ---    CACHE LINE BOUNDARY (64) ---
+ *  64     head            producer (W)    Next write index
+ *                         consumer (R)
+ *  72     cached_tail     producer only   Producer's snapshot of tail
+ *  80     (padding)       -               Pad to 64-byte boundary
+ *  ---    CACHE LINE BOUNDARY (128) ---
+ * 128     tail            consumer (W)    Next read index
+ *                         producer (R)
+ * 136     cached_head     consumer only   Consumer's snapshot of head
+ * 144     (padding)       -               Pad to 64-byte boundary
+ *  ---    END (192) ---
+ */
+
 // targeting arm cortex a53
 .text
     .arch   armv8-a
