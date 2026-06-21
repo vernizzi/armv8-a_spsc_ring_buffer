@@ -11,9 +11,9 @@
  * atomic read-modify-write (no LDXR/STXR, no CAS), we only need proper
  * load/store ordering.
  *
- * WHY MEMORY BARRIERS ON CORTEX-A76?
+ * WHY MEMORY BARRIERS ON CORTEX-A53?
  * -----------------------------------
- * ARM processors (including Cortex-A76) have a WEAK memory model. This means
+ * ARM processors (including Cortex-A53) have a WEAK memory model. This means
  * the CPU is free to reorder loads and stores for performance, as long as the
  * reordering is invisible to the CURRENT thread. But another thread on another
  * core CAN observe these reorderings.
